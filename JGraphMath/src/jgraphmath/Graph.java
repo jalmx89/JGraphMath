@@ -31,7 +31,8 @@ import java.util.Random;
 
 /**
  * {@code Graph} represents a non-weighted simple
- * <a href="https://en.wikipedia.org/wiki/Graph_(mathematics)">graph</a>.
+ * <a href="https://en.wikipedia.org/wiki/Graph_(mathematics)">graphs</a> with
+ * at least two vertices.
  * <p>
  * At its core {@code Graph} stores the graph it represents using an boolean
  * <a href="https://en.wikipedia.org/wiki/Adjacency_matrix">adjacency matrix
@@ -700,6 +701,144 @@ public class Graph implements Iterable<Boolean> {
      */
     public boolean isCycleGraph() {
         return isConnected() && getSize() == order;
+    }
+    
+    /**
+     * Returns {@code true} if the specified object is a {@code Graph} with the
+     * same number of vertices as this graph and its adjacency matrix is
+     * identical to the adjacency matrix of this graph. This method does not
+     * check for isomorphic equivalence.
+     * 
+     * @param obj the reference object with which to compare
+     * @return {@code true} if {@code obj} is a graph whose adjacency matrix is
+     * identical to this graphs adjacency matrix
+     */
+    @Override
+    public boolean equals(Object obj) {
+        if (obj == null)
+            return false;
+        if (!(obj instanceof Graph))
+            return false;
+        Graph g = (Graph)obj;
+        if (g.order != order)
+            return false;
+        for (int i=0; i<matrix.length; i++)
+            if (g.matrix[i] != matrix[i])
+                return false;
+        return true;
+    }
+    
+    @Override
+    public int hashCode() {
+        int hash = 5;
+        hash = 79 * hash + this.order;
+        hash = 79 * hash + Arrays.hashCode(this.matrix);
+        return hash;
+    }
+    
+    /**
+     * Returns {@code true} if the this graph is equal to the specified graph
+     * under the provided vertex mapping. 
+     * <p>
+     * In more precise terms, if for every pair of vertex indices {@code a} and 
+     * {@code b} it holds that 
+     * {@code (this.getEdge(a, b) == g.getEdge(map[a], map[b])}, then this
+     * method will return {@code true}, otherwise it will return {@code false}.
+     * This method also returns {@code false} if the order of the provided graph
+     * is not equal to the order of this graph.
+     * 
+     * @param g the graph to test equality against
+     * @param map the vertex map
+     * @return {@code true} if the this graph is equal to the specified graph
+     * under the provided vertex mapping
+     */
+    public boolean equals(Graph g, int[] map) {
+        if (g.order != order)
+            return false;
+        int i=0;
+        for (int r=1; r<order; ++r)
+            for (int c=0; c<r; ++c)
+                if (getEdge(i++) != g.getEdge(map[r], map[c]))
+                    return false;
+        return true;
+    }
+    
+    /**
+     * Returns {@code true} if this graph is isomorphic to the specified graph.
+     * <p>
+     * This method is implemented using the Johnson Trotter permutation
+     * algorithm.
+     * 
+     * @param g the graph with which to test for isomorphism
+     * @return {@code true} if this graph is isomorphic to the specified graph
+     * @see #getIsomorphicMapJohnsonTrotter(jgraphmath.Graph)
+     */
+    public boolean isIsomorphicMapJohnsonTrotter(Graph g) {
+        return getIsomorphicMapJohnsonTrotter(g) != null;
+    }
+    
+    /**
+     * Returns an isomorphic mapping using the Johnson Trotter permutation
+     * algorithm, or {@code null} if no isomorphic mapping exists.
+     * <p>
+     * If an isomorphism exists between this graph and the specified graph, then
+     * the returned map will contain an isomorphic mapping from the vertex 
+     * indexes in the specified map to the vertex indices in this map.
+     * 
+     * @param g the graph with which to find the isomorphic mapping
+     * @return an isomorphic mapping, or {@code null}
+     */
+    public int[] getIsomorphicMapJohnsonTrotter(Graph g) {
+        if (g.order != order)
+            return null;
+        int[] prm = new int[order];     // permutation
+        int[] inv = new int[order];     // inverse permutation
+        int[] dir = new int[order];     // direction = +1 or -1
+        for(int i=0; i<order; i++) {
+            dir[i] = -1;
+            prm[i] = i;
+            inv[i] = i;
+        }
+        return getIsomorphicMapJohnsonTrotter(g, 0, prm, inv, dir);
+    }
+    
+    /**
+     * Recursive helper method used by
+     * {@link #getIsomorphicMapJohnsonTrotter(Graph.Graph)}.
+     *
+     * @param g the graph with which to find the isomorphic mapping
+     * @param n the "position" of the algorithm in the map
+     * @param prm the current permutation
+     * @param inv the inverse permutation
+     * @param dir the current "direction" of the algorithm
+     * @return an isomorphic mapping, or {@code null}
+     * @see #getIsomorphicMapJohnsonTrotter(jgraphmath.Graph, int, int[], int[], int[]) 
+     */
+    private int[] getIsomorphicMapJohnsonTrotter(Graph g, int n, int[] prm, int[] inv, int[] dir) { 
+        if (prm.length <= n) {
+            if (equals(g, prm)) {
+                return prm;
+            } else {
+                return null;
+            }
+        }
+        int[] map = getIsomorphicMapJohnsonTrotter(g, n+1, prm, inv, dir);
+        if (map != null) {
+            return map;
+        }
+        for(int i=0; i<=n-1; i++) {
+            int z = prm[inv[n] + dir[n]];
+            prm[inv[n]] = z;
+            prm[inv[n] + dir[n]] = n;
+            inv[z] = inv[n];
+            inv[n] = inv[n] + dir[n];  
+            map = getIsomorphicMapJohnsonTrotter(g, n+1, prm, inv, dir);
+            if (map != null) {
+                return map;
+            }
+        }
+        dir[n] = -dir[n];
+        return null;
     }
     
     /**
