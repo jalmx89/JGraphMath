@@ -18,7 +18,7 @@
 
 package jgraphmath;
 
-import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -27,25 +27,47 @@ import java.util.List;
  */
 public class Test {
     public static void main(String[] args) {
+        final int minOrder = 2;
+        final int maxOrder = 4;
         
-        final int maxOrder = 8;
-        
-        for (int order = 2; order <= maxOrder; order++) {
-            Graph g = new Graph(order);
-            List<Graph> iso = new ArrayList();
-            iso.add(new Graph(g));
-            
-            incr: while (g.increment()) {
-                for (int i=0; i<iso.size(); i++) {
-                    Graph h = iso.get(i);
-                    if (h.isIsomorphicMapJohnsonTrotter(g)) {
-                        continue incr;
-                    }
-                }
-                iso.add(new Graph(g));
+        for (int order = minOrder; order <= maxOrder; order++) {
+            Iterator<Graph> it = Graph.itLabeledGraphs(order);
+            while (it.hasNext()) {
+                Graph g = it.next();
+                g.printLowerTriangle();
+                System.out.println(g.toString());
+                System.out.println();
             }
-            
-            System.out.println(iso.size()+" classes of isomorphic graphs with "+order+" vertexes");
         }
+        
+//        final int minOrder = 2;
+//        final int maxOrder = 6;
+//        
+//        for (int order = minOrder; order <= maxOrder; order++) {
+//            Graph g = Graph.newStar(order, 0);
+//            
+//            List<Graph> iso = new ArrayList();
+//            iso.add(new Graph(g));
+//            g.printLowerTriangle();
+//            
+//            search: while (g.increment()) {
+//                if (!g.isConnected())
+//                    continue;
+//                for (Graph h : iso)
+//                    if (g.isIsomorphic(h))
+//                        continue search;
+////                if (g.getSize() < s-1)  {
+////                    System.out.println(g.getSize()+" "+s);
+////                    g.printLowerTriangle();
+////                }
+//                
+//                iso.add(new Graph(g));
+//            }
+//            System.out.println("size: "+iso.size()+"\n");
+//        }
+    }
+    
+    public static List<Integer> makeList(int order) {
+        return null;
     }
 }

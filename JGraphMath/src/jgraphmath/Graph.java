@@ -24,15 +24,13 @@ import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.BitSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
 
 /**
- * {@code Graph} represents a non-weighted simple
- * <a href="https://en.wikipedia.org/wiki/Graph_(mathematics)">graphs</a> with
- * at least two vertices.
+ * {@code Graph} represents a simple, unweighted labeled
+ * <a href="https://en.wikipedia.org/wiki/Graph_(mathematics)">graph</a>.
  * <p>
  * At its core {@code Graph} stores the graph it represents using an boolean
  * <a href="https://en.wikipedia.org/wiki/Adjacency_matrix">adjacency matrix
@@ -51,9 +49,8 @@ import java.util.Random;
  * <p>
  * Example usage:
  * <pre>{@code 
- * // The following code fills a list with every connected graph that has fewer
- * // than 8 verticies. Note that the resultant list will contain many 
- * // isomorphically equivalent graphs.
+ * // The following code fills a list with every connected labeled graph that 
+ * // has fewer than 8 verticies.
  * 
  * List<Graph> list = new ArrayList();
  * for (int v = 1; v < 8; v++) {
@@ -82,15 +79,17 @@ public class Graph implements Iterable<Boolean> {
     protected final long matrixCapacity;
     
     /**
-     * The precomputed value of {@code matrixCapacity%64}.
+     * A mask with the lowest {@code (matrixCapacity % 64)} bits set. 
      */
-    protected final int capMod64;
+    protected final long highMask;
     
     /**
      * The bit-packed representation of the lower triangle of the graph's 
      * boolean adjacency matrix.
      */
     protected final long[] matrix;
+    
+    
     
     /** 
     * The number of edges in this graph.
@@ -99,6 +98,14 @@ public class Graph implements Iterable<Boolean> {
      * @see #getSize()
      */
     protected Long size = null;
+    
+    /**
+     * An array containing the degree sequence.
+     * <p>
+     * Uses lazy instantiation.
+     * @see #getDegreeSequence()
+     */
+    protected int[] degrees = null;
     
     /**
      * The adjacency list representation of the graph.
@@ -124,14 +131,9 @@ public class Graph implements Iterable<Boolean> {
      * Uses lazy instantiation.
      * @see #getComponentGraphs()
      */
-    protected Subgraph[] componentGraphs = null;
+    protected Graph[] componentGraphs = null;
     
-    /**
-     * A list of weak references to subgraphs of this graph. This list is used
-     * to notify subgraphs that have not been collected by the GC about
-     * modifications to their supergraph (this graph).
-     */
-    protected List<WeakReference<Subgraph>> subgraphs;
+    
     
     /** 
      * Constructs a new {@code Graph} with the specified number of vertices and
@@ -143,8 +145,8 @@ public class Graph implements Iterable<Boolean> {
      */
     protected Graph(int order, long[] matrix) {
         this.order = order;
-        matrixCapacity = triangular(order-1);
-        capMod64 = (int)matrixCapacity & 0x3F;
+        matrixCapacity = getMaximumSize(order);
+        highMask = ~(~0L << (matrixCapacity & 0x3F));
         this.matrix = matrix;
     }
     
@@ -156,8 +158,8 @@ public class Graph implements Iterable<Boolean> {
      */
     public Graph(int order) {
         this.order = order;
-        matrixCapacity = triangular(order-1);
-        capMod64 = (int)matrixCapacity & 0x3F;
+        matrixCapacity = getMaximumSize(order);
+        highMask = ~(-1L << (matrixCapacity & 0x3F));
         matrix = new long[(int)((matrixCapacity+63L)/64L)];
     }
     
@@ -169,53 +171,49 @@ public class Graph implements Iterable<Boolean> {
     public Graph(Graph g) {
         order = g.order;
         matrixCapacity = g.matrixCapacity;
-        capMod64 = g.capMod64;
-        matrix = Arrays.copyOf(g.matrix, g.matrix.length);
+        highMask = g.highMask;
+        matrix = g.matrix.clone();
+        if (g.size != null)
+            size = g.size;
+        if (g.degrees != null)
+            degrees = Arrays.copyOf(g.degrees, g.degrees.length);
+        if (g.adjacency != null) {
+            adjacency = new int[g.adjacency.length][];
+            for (int i=0; i<adjacency.length; i++) {
+                adjacency[i] = g.adjacency[i].clone();
+            }
+        }
+        if (g.components != null) {
+            components = new int[g.components.length][];
+            for (int i=0; i<components.length; i++) {
+                components[i] = g.components[i].clone();
+            }
+        }
     }
     
     /**
-     * Registers a subgraph of this graph so that it can receive modification
-     * notifications when this graph is modified.
-     * 
-     * @param subgraph the subgraph to register
-     */
-    protected void addSubgraph(Subgraph subgraph) {
-        if (subgraphs == null)
-            subgraphs = new ArrayList();
-        subgraphs.add(new WeakReference(subgraph));
-    }
-    
-    /**
-     * Signals that the graphs adjacency matrix has been modified.
+     * Constructs a new {@code Graph} that is a subgraph of the specified graph
+     * using the specified vertex index map.
      * <p>
-     * If this method is overridden, the overriding method should invoke
-     * {@code super.modified()} so that the subgraphs are still notified about
-     * the modification.
+     * The vertex at index {@code n} in the newly constructed graph will be 
+     * mapped from the vertex at index {@code map[n} in the specified graph.
      */
-    protected void modified() {
-        // Clear cached data
-        size = null;
-        adjacency = null;
-        components = null;
-        componentGraphs = null; 
+    public Graph(Graph g, int[] map) {
+        this(map.length);
         
-        // If there are subgraphs attached to this graph
-        if (subgraphs != null) {
-            // For every supergraph reference
-            for (int i=subgraphs.size()-1; i>=0; i--) {
-                // Try to get the supergraph
-                Subgraph subgraph = subgraphs.get(i).get();
-                // If the supergraph has been garbage collected
-                if (subgraph == null) {
-                    // Remove it from the list
-                    subgraphs.remove(i);
-                } else {
-                    // Otherise, signal that the supergraph has been modified
-                    subgraph.modified();
+        long[] m = matrix;
+        long index = 0;
+        for (int r=1; r<order; r++) {
+            int R = map[r];
+            for (int c=0; c<r; c++) {
+                if (g.getEdge(R, map[c])) {
+                    m[(int)(index>>>6)] |= (1L << index);
                 }
             }
         }
     }
+    
+    
     
     /**
      * Returns the number of vertices in the graph.
@@ -305,7 +303,7 @@ public class Graph implements Iterable<Boolean> {
      * Sets the presence of the edge from the vertex at index {@code a} to the
      * vertex at index {@code b}. If the {@code value} argument is {@code true}
      * the edge will contain the specified edge after this method call,
-     * otherwise it will not.
+     * otherwise it will not. This method has no effect if {@code a==b}.
      *
      * @param a the index of the first vertex
      * @param b the index of the second vertex
@@ -320,14 +318,32 @@ public class Graph implements Iterable<Boolean> {
     }
     
     /**
+     * Signals that the graphs adjacency matrix has been modified.
+     * <p>
+     * If this method is overridden, the overriding method should invoke
+     * {@code super.modified()} so that the subgraphs are still notified about
+     * the modification.
+     */
+    protected void modified() {
+        // Clear cached data
+        size = null;
+        degrees = null;
+        adjacency = null;
+        components = null;
+        componentGraphs = null; 
+    }
+    
+    
+    
+    /**
      * Randomizes the edges contained in the graph. This method randomizes the
      * entries in the graph's adjacency matrix.
      */
     public void randomize() {
         Random random = new Random();
-        for (int i=0; i<matrix.length-1; i++)
+        for (int i=0; i<matrix.length; i++)
             matrix[i] = random.nextLong();
-        matrix[matrix.length-1] = (random.nextLong() >>> (64-capMod64));
+        matrix[matrix.length-1] &= highMask;
         modified();
     }
     
@@ -340,7 +356,7 @@ public class Graph implements Iterable<Boolean> {
     public void complement() {
         for (int i=0; i<matrix.length; i++)
             matrix[i] = ~matrix[i];
-        matrix[matrix.length-1] &= (0xFFFFFFFFFFFFFFFFL >>> (64-capMod64));
+        matrix[matrix.length-1] &= highMask;
         modified();
     }
     
@@ -358,120 +374,381 @@ public class Graph implements Iterable<Boolean> {
      */
     public boolean increment() {
         modified();
-        int n = matrix.length-1;
-        for (int i=0; i<n; i++) {
-            matrix[i]++;
-            if (matrix[i] == 0L) {
+        long[] m = matrix;
+        int n = m.length-1;
+        for (int i=0; i<n; i++)
+            if (++m[i] != 0L)
                 return true;
-            }
+        long v = m[n];
+        boolean b = (v != highMask);
+        m[n] = (v + 1) & highMask;
+        return b;
+    }
+    
+    
+    
+    /**
+     * Represents the order in which bits are read from the lower triangle of
+     * a graph's adjacency matrix.
+     */
+    public static enum ReadOrder {
+        /**
+         * Left-to-right (top-to-bottom).
+         * <pre>{@code
+         * 0
+         * 1 2
+         * 3 4 5}</pre>
+         */
+        LRTB(true, true, true),
+        
+        /**
+         * Left-to-right (bottom-to-top).
+         * <pre>{@code
+         * 5
+         * 3 4
+         * 0 1 2}</pre>
+         */
+        LRBT(true, true, false),
+        
+        /**
+         * Right-to-left (top-to-bottom).
+         * <pre>{@code
+         * 0
+         * 2 1
+         * 5 4 3}</pre>
+         */
+        RLTB(true, false, true),
+        
+        /**
+         * Right-to-left (bottom-to-top).
+         * <pre>{@code
+         * 5
+         * 4 3
+         * 2 1 0}</pre>
+         */
+        RLBT(true, false, false),
+        
+        /**
+         * Top-to-bottom (left-to-right).
+         * <pre>{@code
+         * 0
+         * 1 3
+         * 2 4 5}</pre>
+         */
+        TBLR(false, true, true),
+        
+        /**
+         * Bottom-to-top (left-to-right).
+         * <pre>{@code
+         * 2
+         * 1 4
+         * 0 3 5}</pre>
+         */
+        BTLR(false, true, false),
+        
+        /**
+         * Top-to-bottom (right-to-left).
+         * <pre>{@code
+         * 3
+         * 4 1
+         * 5 2 0}</pre>
+         */
+        TBRL(false, false, true),
+        
+        /**
+         * Bottom-to-top (right-to-left).
+         * <pre>{@code
+         * 5
+         * 4 2
+         * 3 1 0}</pre>
+         */
+        BTRL(false, false, false);
+        
+        boolean major;
+        boolean rowdir;
+        boolean coldir;
+        
+        ReadOrder(boolean major, boolean rowdir, boolean coldir) {
+            this.rowdir = rowdir;
+            this.coldir = coldir;
+            this.major = major;
         }
-        matrix[n]++;
-        if ((matrix[n] >>> capMod64) != 0) {
-            matrix[n] = 0;
-            return false;
+        
+        /**
+         * Returns {@code true} if row-major order and {@code false} if
+         * column-major order.
+         * 
+         * @return {@code true} if row-major order
+         */
+        public boolean getMajorOrder() {
+            return major;
         }
-        return true;
+        
+        /**
+         * Returns {@code true} if rows are read from left to right and
+         * {@code false} if rows are read from right to left.
+         * 
+         * @return {@code true} if rows are read from left to right
+         */
+        public boolean getRowDirection() {
+            return rowdir;
+        }
+        
+        /**
+         * Returns {@code true} if columns are read from top to bottom and
+         * {@code false} if columns are read from bottom to top.
+         * 
+         * @return {@code true} if columns are read from top to bottom
+         */
+        public boolean getColDirection() {
+            return rowdir;
+        }
     }
     
     /**
      * Returns an iterator that traverses the lower triangle of the graph's
-     * adjacency matrix by reading bits from the lower triangle from left to
-     * right and top to bottom, using the first bit read as the least.
+     * adjacency matrix in the order specified by {@code readOrder}.
      * 
-     * @return an iterator that traverses the graph's adjacency matrix
+     * @param readOrder the order in which the lower triangle of the graph's
+     * adjacency matrix is traversed
+     * @return an iterator that traverses the lower triangle of the graph's
+     * adjacency matrix
+     */
+    public Iterator<Boolean> iterator(ReadOrder readOrder) {
+        if (readOrder.major)
+            if (readOrder.rowdir)
+                if (readOrder.coldir)
+//                    for (int r=1; r<order; r++)
+//                        for (int c=0; c<r; c++)
+                    return new Iterator<Boolean>() {
+                        int r = 1;
+                        int c = 0;
+                        @Override public boolean hasNext() {
+                            return r < order;
+                        }
+                        @Override public Boolean next() {
+                            boolean b = getEdge(r, c);
+                            if (++c >= r) {
+                                r++;
+                                c = 0;
+                            }
+                            return b;
+                        }
+                    };
+                else 
+//                    for (int r=1; r<order; r++)
+//                        for (int c=r-1; c>=0; c--)
+                    return new Iterator<Boolean>() {
+                        int r = 1;
+                        int c = r-1;
+                        @Override public boolean hasNext() {
+                            return r < order;
+                        }
+                        @Override public Boolean next() {
+                            boolean b = getEdge(r, c);
+                            if (--c < 0) {
+                                r++;
+                                c = r-1;
+                            }
+                            return b;
+                        }
+                    };
+            else 
+                if (readOrder.coldir)
+//                    for (int r=order; r>=1; r--)
+//                        for (int c=0; c<r; c++)
+                    return new Iterator<Boolean>() {
+                        int r = order;
+                        int c = 0;
+                        @Override public boolean hasNext() {
+                            return r >= 1;
+                        }
+                        @Override
+                        public Boolean next() {
+                            boolean b = getEdge(r, c);
+                            if (++c >= r) {
+                                r--;
+                                c = 0;
+                            }
+                            return b;
+                        }
+                    };
+                else 
+//                    for (int r=order; r>=1; r--)
+//                        for (int c=r-1; c>=0; c--)
+                    return new Iterator<Boolean>() {
+                        int r = order;
+                        int c = r-1;
+                        @Override public boolean hasNext() {
+                            return r >= 1;
+                        }
+                        @Override
+                        public Boolean next() {
+                            boolean b = getEdge(r, c);
+                            if (--c < 0) {
+                                r--;
+                                c = r-1;
+                            }
+                            return b;
+                        }
+                    };
+        else 
+            if (readOrder.rowdir)
+                if (readOrder.coldir)
+//                    for (int c=0; c<order-1; c++)
+//                        for (int r=c+1; r<order; r++)
+                    return new Iterator<Boolean>() {
+                        int c = 0;
+                        int r = c+1;
+                        @Override public boolean hasNext() {
+                            return c < order-1;
+                        }
+                        @Override public Boolean next() {
+                            boolean b = getEdge(r, c);
+                            if (++r >= order) {
+                                c++;
+                                r = c+1;
+                            }
+                            return b;
+                        }
+                    };
+                else 
+//                    for (int c=order-2; c>=0; c--)
+//                        for (int r=c+1; r<order; r++)
+                    return new Iterator<Boolean>() {
+                        int c = order-2;
+                        int r = c+1;
+                        @Override public boolean hasNext() {
+                            return c >= 0;
+                        }
+                        @Override public Boolean next() {
+                            boolean b = getEdge(r, c);
+                            if (++r >= order) {
+                                c--;
+                                r = c+1;
+                            }
+                            return b;
+                        }
+                    };
+            else 
+                if (readOrder.coldir)
+//                    for (int c=0; c<order-1; c++)
+//                        for (int r=order-1; r>c; r--)
+                    return new Iterator<Boolean>() {
+                        int c = 0;
+                        int r = order-1;
+                        @Override public boolean hasNext() {
+                            return c < order-1;
+                        }
+                        @Override public Boolean next() {
+                            boolean b = getEdge(r, c);
+                            if (--r <= c) {
+                                c++;
+                                r = order-1;
+                            }
+                            return b;
+                        }
+                    };
+                else 
+//                    for (int c=order-2; c>=0; c--)
+//                        for (int r=order-1; r>c; r--)
+                    return new Iterator<Boolean>() {
+                        int c = order-2;
+                        int r = order-1;
+                        @Override public boolean hasNext() {
+                            return c >= 0;
+                        }
+                        @Override public Boolean next() {
+                            boolean b = getEdge(r, c);
+                            if (--r <= c) {
+                                c--;
+                                r = order-1;
+                            }
+                            return b;
+                        }
+                    };
+    }
+    
+    /**
+     * Returns an iterator that traverses the lower triangle of the graph's
+     * adjacency matrix by reading bits from left left-to-right and 
+     * top-to-bottom.
+     * <p>
+     * Equivalent to (though more efficient than) calling
+     * {@code iterator(ReadOrder.LRTB)}.
+     *
+     * @return an iterator that traverses the lower triangle of the graph's
+     * adjacency matrix
      */
     @Override
     public Iterator<Boolean> iterator() {
         return new Iterator<Boolean>() {
             long index = 0;
-            @Override
-            public boolean hasNext() {
+            @Override public boolean hasNext() {
                 return index < matrixCapacity;
             }
-            @Override
-            public Boolean next() {
+            @Override public Boolean next() {
                 return getEdge(index++);
             }
         };
     }
     
     /**
-     * Converts the lower triangle of the graph's adjacency matrix into a binary
-     * string by reading bits from the lower triangle from left to right and top
-     * to bottom so that the first character in the string represents the
-     * first bit read.
+     * Returns a binary (characters {@code '0'} and {@code '1'}) string
+     * representation of the lower triangle of the graphs adjacency matrix using
+     * the read order specified.
+     * <p>
+     * The first bit read, which is determined by the read order, will be stored
+     * in index {@code 0} of the returned string.
      * 
+     * @param readOrder the order that bits will be read
      * @return a binary string representation of the graph
      */
-    public String toBinString() {
+    public String toString(ReadOrder readOrder) {
         char[] arr = new char[(int)matrixCapacity];
         int idx = 0;
-        for (Boolean b : this)
-            arr[idx++] = b ? '1' : '0';
+        Iterator<Boolean> it = iterator(readOrder);
+        while (it.hasNext())
+            arr[idx++] = it.next()? '1' : '0';
         return new String(arr);
     }
     
     /**
-     * Converts the lower triangle of the graph's adjacency matrix into a 
-     * decimal string by reading bits from the lower triangle from left to right
-     * and top to bottom so that the least significant bit in the binary 
-     * representation of the returned decimal number represents the
-     * first bit read.
+     * Returns the bit-packed lower triangle of the graph's adjacency matrix as
+     * a little-endian binary string.
      * <p>
-     * Equivalent to {@code toBigInteger().toString()}.
-     * 
-     * @return a decimal string representation of the graph
+     * Equivalent to (thought more efficient than) calling 
+     * {@code toString(BitOrder.RLTB).
+     *
+     * @return a binary string representation of the graph
      */
-    public String toDecString() {
-        return toBigInteger().toString();
+    @Override
+    public String toString() {
+        char[] arr = new char[(int)matrixCapacity];
+        int idx = arr.length;
+        for (Boolean b : this)
+            arr[--idx] = b ? '1' : '0';
+        return new String(arr);
     }
     
     /**
-     * Converts the lower triangle of the graph's adjacency matrix into a
-     * {@code boolean} array by reading bits from the lower triangle from left
-     * to right and top to bottom so that the entry at index 0 in the array is
-     * the first value read.
-     *
-     * @return a {@code boolean} array representation of the graph
+     * Returns a {@code BigInteger} representation of the lower triangle of the
+     * graphs adjacency matrix using the read order specified.
+     * <p>
+     * Equivalent to {@code new BigInteger(toString(readOrder), 2)}.
+     * 
+     * @return a {@code BigInteger} representation of the graph
      */
-    public boolean[] toBooleanArray() {
-        boolean[] arr = new boolean[(int)matrixCapacity];
-        int idx = 0;
-        for (Boolean b : this) {
-            arr[idx++] = b;
-        }
-        return arr;
+    public BigInteger toBigInteger(ReadOrder readOrder) {
+        return new BigInteger(toString(readOrder), 2);
     }
-
+    
     /**
-     * Converts the lower triangle of the graph's adjacency matrix into a
-     * {@code BitSet} by reading bits from the lower triangle from left to right
-     * and top to bottom, using the first bit read as the least significant bit.
-     *
-     * @return a {@code BitSet} representation of the graph
-     */
-    public BitSet toBitSet() {
-        return BitSet.valueOf(matrix);
-    }
-
-    /**
-     * Converts the lower triangle of the graph's adjacency matrix into a
-     * {@code long} array by reading bits from the lower triangle from left to
-     * right and top to bottom. Values are bit packed into the {@code long}
-     * values such that the first bit read is stored in the least significant
-     * bit of {@code long} at index 0 in the returned array.
-     *
-     * @return a {@code long} array representation of the graph
-     */
-    public long[] toLongArray() {
-        return Arrays.copyOf(matrix, matrix.length);
-    }
-
-    /**
-     * Converts the lower triangle of the graph's adjacency matrix into a
-     * {@code BigInteger} by reading bits from the lower triangle from left to
-     * right and top to bottom, using the first bit read as the least
-     * significant bit.
+     * Returns a {@code BigInteger} representation of the bit-packed lower
+     * triangle of the graphs adjacency matrix.
+     * <p>
+     * Equivalent to (though more efficient than) 
+     * {@code toBigInteger(BitOrder.RLTB)}.
      *
      * @return a {@code BigInteger} representation of the graph
      */
@@ -483,36 +760,7 @@ public class Graph implements Iterable<Boolean> {
         return new BigInteger(1, bb.array());
     }
     
-    /**
-     * Prints the lower triangle of the graph's adjacency matrix to the standard
-     * output stream.
-     */
-    public void printLowerTriangle() {
-        StringBuilder str = new StringBuilder();
-        for (int row = 1; row < order; row++) {
-            for (int col = 0; col < row; col++)
-                str.append(getEdge(row, col)?"1 ":"0 ");
-            str.append("\n");
-        }
-        System.out.println(str);
-    }
     
-    /**
-     * Prints the upper triangle of the graph's adjacency matrix to the standard
-     * output stream.
-     */
-    public void printUpperTriangle() {
-        StringBuilder str = new StringBuilder();
-        for (int row = 0; row < order-1; row++) {
-            int col = 0;
-            for (; col <= row; col++)
-                str.append("  ");
-            for (; col < order; col++)
-                str.append(getEdge(row, col)?"1 ":"0 ");
-            str.append("\n");
-        }
-        System.out.println(str);
-    }
     
     /**
      * Prints the graph's adjacency matrix to the standard output stream.
@@ -528,6 +776,39 @@ public class Graph implements Iterable<Boolean> {
     }
     
     /**
+     * Prints the upper triangle of the graph's adjacency matrix to the standard
+     * output stream.
+     */
+    public void printUpperTriangle() {
+        StringBuilder str = new StringBuilder();
+        for (int r=0; r<order-1; r++) {
+            int c = 0;
+            for (; c<=r; c++)
+                str.append("  ");
+            for (; c<order; c++)
+                str.append(getEdge(r, c) ? "1 ": "0 ");
+            str.append("\n");
+        }
+        System.out.println(str);
+    }
+    
+    /**
+     * Prints the lower triangle of the graph's adjacency matrix to the standard
+     * output stream.
+     */
+    public void printLowerTriangle() {
+        StringBuilder str = new StringBuilder();
+        for (int r=1; r<order; r++) {
+            for (int c=0; c<r; c++)
+                str.append(getEdge(r, c) ? "1 " : "0 ");
+            str.append("\n");
+        }
+        System.out.println(str);
+    }
+    
+    
+    
+    /**
      * Returns the number of edges in this graph.
      * 
      * @return the number of edges
@@ -541,25 +822,6 @@ public class Graph implements Iterable<Boolean> {
             size = total;
         }
         return size;
-    }
-    
-    /**
-     * Returns {@code true} if the graph has no edges.
-     * 
-     * @return {@code true} if the graph has no edges.
-     */
-    public boolean isEmpty() {
-        return getSize() == 0;
-    }
-    
-    /**
-     * Returns {@code true} if the graph is a complete graph. A graph is
-     * complete if every vertex is connected to every other vertex by an edge.
-     * 
-     * @return {@code true} if the graph is a complete graph
-     */
-    public boolean isComplete() {
-        return getSize() == getMaximumSize();
     }
     
     /**
@@ -596,14 +858,39 @@ public class Graph implements Iterable<Boolean> {
     }
     
     /**
+     * Returns the
+     * <a hfref="https://en.wikipedia.org/wiki/Degree_(graph_theory)#Degree_sequence">
+     * degree sequence</a> of the graph.
+     * 
+     * @return the degree sequence
+     */
+    public int[] getDegreeSequence() {
+        if (degrees == null) {
+            int[][] e = getAdjacencyList();
+            int len = e.length;
+            int[] d = new int[len];
+            for (int i=0; i<len; i++)
+                d[i] = e[i].length;
+            // This is a rubbish way to get decending order, but for the 
+            // sorting methods for primative do not accept comparators and 
+            // I'm too lazy to write a sorting algorithm just for this.
+            Arrays.sort(d);
+            for (int i=0; i<len; i++)
+                d[i] = d[len-1-i];
+            degrees = d;
+        }
+        return degrees;
+    }
+    
+    /**
      * Returns a jagged array representation of the disjoint components of this
      * graph.
      * <p>
      * If the returned array has length {@code n}, then this graph has {@code n}
      * disjoint components whose union is equal to this graph. If
      * {@code getComponents()[0].length == m}, then the first component of this
-     * graph contains {@code m} vertices and their indexes (in {@code this}
-     * graph) are stored in {@code getComponents()[0]}, and so forth.
+     * graph contains {@code m} vertices and their indices (in {@code this}
+     * graph) are stored in {@code getComponents()[0]}.
      *
      * @return a jagged array representation of the disjoint components of this
      * graph
@@ -625,7 +912,7 @@ public class Graph implements Iterable<Boolean> {
             boolean[] visited = new boolean[order];
             // Keep track of the next vertex that has not been visted
             int visitPos = 0;
-            // Continue untill all verticies have been visited
+            // Continue until all verticies have been visited
             while (queueFront < order) {
                 // The size of the current compoennt
                 int currCompSize = 0;
@@ -662,7 +949,11 @@ public class Graph implements Iterable<Boolean> {
                 comps[compCount++] = Arrays.copyOf(currComp, currCompSize);
             }
             // Truncate the components arrays
-            components = Arrays.copyOf(comps, compCount);
+            comps = Arrays.copyOf(comps, compCount);
+            // Sort the components in ascending order by vertex count
+            Arrays.sort(comps, (int[] a, int[] b)->(a.length-b.length));
+            // Store the components
+            components = comps;
         }
         return components;
     }
@@ -673,15 +964,62 @@ public class Graph implements Iterable<Boolean> {
      * 
      * @return an array of disjoint subgraphs
      */
-    public Subgraph[] getComponentGraphs() {
+    public Graph[] getComponentGraphs() {
         if (componentGraphs == null) {
             int[][] comps = getComponents();
-            Subgraph[] subs = new Subgraph[comps.length];
+            Graph[] subs = new Graph[comps.length];
             for (int i=0; i<subs.length; i++)
-                subs[i] = new Subgraph(this, comps[i]);
+                subs[i] = new Graph(this, comps[i]);
             componentGraphs = subs;
         }
         return componentGraphs;
+    }
+    
+    
+    
+    /**
+     * Returns the number of disjoint components in this graph.
+     * 
+     * @return the number of disjoint components in this graph.
+     */
+    public int getNumComponents() {
+        return getComponents().length;
+    }
+    
+    
+    
+    /**
+     * Returns {@code true} if the graph has no edges.
+     * 
+     * @return {@code true} if the graph has no edges.
+     */
+    public boolean isEmpty() {
+        return getSize() == 0;
+    }
+    
+    /**
+     * Returns {@code true} if the graph is a complete graph. A graph is
+     * complete if every vertex is connected to every other vertex by an edge.
+     * 
+     * @return {@code true} if the graph is a complete graph
+     */
+    public boolean isComplete() {
+        return getSize() == getMaximumSize();
+    }
+    
+    /**
+     * Returns {@code true} if the graph is regular. A graph is regular when
+     * every vertex has the same degree.
+     * 
+     * @return {@code true} if the graph is regular
+     */
+    public boolean isRegular() {
+        int[] d = getDegreeSequence();
+        int v = d[0];
+        for (int i=1; i<d.length; i++)
+            if (d[i] != v)
+                return false;
+        return true;
     }
     
     /**
@@ -691,6 +1029,11 @@ public class Graph implements Iterable<Boolean> {
      * @return {@code true} if the graph is connected
      */
     public boolean isConnected() {
+        long s = getSize();
+        if (s < order-1)
+            return false;
+        if (s >= matrixCapacity-order+1)
+            return true;
         return getComponents().length == 1;
     }
     
@@ -701,6 +1044,51 @@ public class Graph implements Iterable<Boolean> {
      */
     public boolean isCycleGraph() {
         return isConnected() && getSize() == order;
+    }
+    
+    /**
+     * Returns {@code true} if the graph is connected and contains no cycles.
+     * 
+     * @return {@code true} if the graph is connected and contains no cycles
+     */
+    public boolean isTree() {
+        return isConnected() && getSize() == order-1;
+    }
+    
+    /**
+     * Returns {@code true} if each of the graph's disjoint components is a tree
+     * (contains no cycles).
+     * 
+     * @return {@code true} if each of the graph's disjoint components is a tree
+     */
+    public boolean isForest() {
+        if (isConnected()) {
+            return getSize() == order-1;
+        } else {
+            Graph[] sub = getComponentGraphs();
+            for (int i=0; i<sub.length; i++)
+                if (!sub[i].isTree())
+                    return false;
+            return true;
+        }
+    }
+    
+    
+    
+    /**
+     * Returns the hash code for this {@code Graph}.
+     * 
+     * @return the hash code for this {@code Graph}
+     */
+    @Override
+    public int hashCode() {
+        int hash = 1;
+        long[] m = matrix;
+        for (int i=0; i<m.length; i++) {
+            long e = m[i];
+            hash = 31 * hash + (int)(e ^ (e >>> 32));
+        }
+        return hash;
     }
     
     /**
@@ -728,14 +1116,6 @@ public class Graph implements Iterable<Boolean> {
         return true;
     }
     
-    @Override
-    public int hashCode() {
-        int hash = 5;
-        hash = 79 * hash + this.order;
-        hash = 79 * hash + Arrays.hashCode(this.matrix);
-        return hash;
-    }
-    
     /**
      * Returns {@code true} if the this graph is equal to the specified graph
      * under the provided vertex mapping. 
@@ -755,9 +1135,9 @@ public class Graph implements Iterable<Boolean> {
     public boolean equals(Graph g, int[] map) {
         if (g.order != order)
             return false;
-        int i=0;
-        for (int r=1; r<order; ++r)
-            for (int c=0; c<r; ++c)
+        long i=0;
+        for (int r=1; r<order; r++)
+            for (int c=0; c<r; c++)
                 if (getEdge(i++) != g.getEdge(map[r], map[c]))
                     return false;
         return true;
@@ -765,15 +1145,36 @@ public class Graph implements Iterable<Boolean> {
     
     /**
      * Returns {@code true} if this graph is isomorphic to the specified graph.
-     * <p>
-     * This method is implemented using the Johnson Trotter permutation
-     * algorithm.
      * 
      * @param g the graph with which to test for isomorphism
      * @return {@code true} if this graph is isomorphic to the specified graph
-     * @see #getIsomorphicMapJohnsonTrotter(jgraphmath.Graph)
      */
-    public boolean isIsomorphicMapJohnsonTrotter(Graph g) {
+    public boolean isIsomorphic(Graph g) {
+        // Order
+        if (g.order != order)
+            return false;
+        
+        // Size
+        if (g.getSize() != getSize())
+            return false;
+        
+        // Degree list
+        int[] gd = g.getDegreeSequence();
+        int[] d = g.getDegreeSequence();
+        for (int i=0; i<order; i++)
+            if (gd[i] != d[i])
+                return false;
+            
+        // Subcomponents
+        int[][] gc = g.getComponents();
+        int[][] c = g.getComponents();
+        if (gc.length != c.length)
+            return false;
+        for (int i=0; i<c.length; i++)
+            if (gc[i].length != c[i].length)
+                return false;
+        
+        // Last resort, brute force it    
         return getIsomorphicMapJohnsonTrotter(g) != null;
     }
     
@@ -841,6 +1242,161 @@ public class Graph implements Iterable<Boolean> {
         return null;
     }
     
+    
+    
+    /**
+     * Returns a new empty graph on the specified number of vertices.
+     * 
+     * @param order the number of vertices
+     * @return new empty graph
+     */
+    public static Graph makeEmptyGraph(int order) {
+        return new Graph(order);
+    }
+    
+    /**
+     * Returns a new complete graph on the specified number of vertices.
+     * 
+     * @param order the number of vertices
+     * @return a new complete graph
+     */
+    public static Graph makeCompleteGraph(int order) {
+        Graph g = new Graph(order);
+        g.complement();
+        return g;
+    }
+    
+    /**
+     * Returns a new cycle graph on the specified number of vertices.
+     * 
+     * @param order the number of vertices
+     * @return a new cycle graph
+     */
+    public static Graph makeCycleGraph(int order) {
+        Graph g = new Graph(order);
+        for (int i=0; i<order; i++)
+            g.setEdge(i, (i+1)%order, true);
+        return g;
+    }
+    
+    /**
+     * Constructs a new star graph on the specified number of vertices using
+     * the vertex with the specified index as the inner vertex of the star.
+     *  
+     * @param order the number of vertexes in the graph
+     * @param index the index of the vertex to use as the inner vertex
+     * @return a new star graph
+     */
+    public static Graph makeStarGraph(int order, int index) {
+        Graph g = new Graph(order);
+        for (int i=0; i<order; i++)
+            g.setEdge(i, index, true);
+        return g;
+    }
+    
+    
+    
+    /**
+     * Returns an iterator that generates all labeled graphs with the specified
+     * number of vertices.
+     * 
+     * @param order the number of vertices
+     * @return an iterator that generates all labeled graphs with the specified
+     * number of vertices
+     * @see #increment()
+     */
+    public static Iterator<Graph> itLabeledGraphs(int order) {
+        return new Iterator<Graph>() {
+            final Graph g = new Graph(order);
+            boolean b = true;
+            
+            @Override
+            public boolean hasNext() {
+                return b;
+            }
+
+            @Override
+            public Graph next() {
+                Graph h = new Graph(g);
+                b = g.increment();
+                return h;
+            }
+        };
+    }
+    
+    /**
+     * Returns a list of all labeled graphs with the specified number of
+     * vertices.
+     *
+     * @param order the number of vertices
+     * @return a list of all labeled graphs with the specified number of
+     * vertices
+     * @see #itLabeledGraphs(int) 
+     * @see #increment() 
+     */
+    public static ArrayList<Graph> getLabledGraphs(int order) {
+        ArrayList<Graph> list = new ArrayList();
+        Iterator<Graph> it = itLabeledGraphs(order);
+        while (it.hasNext())
+            list.add(it.next());
+        return list;
+    }
+    
+    /**
+     * Returns an iterator that generates all connected labeled graphs with the
+     * specified number of vertices.
+     * <p>
+     * Calling the returned iterators {@code next()} method always returns the
+     * same {@code Graph} object instance, however the graph is modified between
+     * successive calls to {@code next()} by
+     * {@link Graph#increment() incrementing} the graph until the next connected
+     * graph is found.
+     * 
+     * @param order the number of vertices
+     * @return an iterator that generates all connected labeled graphs with the
+     * specified number of vertices
+     * @see #isConnected()
+     */
+    public static Iterator<Graph> itConnectedGraphs(int order) {
+        return new Iterator<Graph>() {
+            final Graph g = makeStarGraph(order, 1);
+            boolean b = true;
+            
+            @Override
+            public boolean hasNext() {
+                return b;
+            }
+
+            @Override
+            public Graph next() {
+                Graph h = new Graph(g);
+                do {
+                    b = g.increment();
+                } while (b && !g.isConnected());
+                return h;
+            }
+        };
+    }
+    
+    /**
+     * Returns a list of all connected labeled graphs with the specified number
+     * of vertices.
+     *
+     * @param order the number of vertices
+     * @return a list of all connected labeled graphs with the specified number
+     * of vertices
+     * @see #itConnectedGraphs(int) 
+     * @see #isConnected() 
+     */
+    public static ArrayList<Graph> getConnectedGraphs(int order) {
+        ArrayList<Graph> list = new ArrayList();
+        Iterator<Graph> it = itConnectedGraphs(order);
+        while (it.hasNext())
+            list.add(it.next());
+        return list;
+    }  
+    
+    
     /**
      * Returns the n-th term in the sequence of triangular numbers. This is
      * sequence <a href="https://oeis.org/A000217">A000217 in OEIS</a>. The n-th
@@ -906,16 +1462,35 @@ public class Graph implements Iterable<Boolean> {
     }
     
     /**
-     * Returns the approximate number of possible edge configurations for a
-     * graph with the specified number of vertices. This is given by the
-     * exponential equation {@code 2^(v*(v-1)/2)}, where {@code v} is the number
-     * of vertices.
+     * Returns the number of unlabeled graphs with the specified number of
+     * vertices. This is given by the exponential equation
+     * {@code 2^(v*(v-1)/2)}, where {@code v} is the number of vertices.
+     * 
+     *
+     * @param order the order of the graph
+     * @return the approximate number of possible edge configurations for a
+     * graph with the specified number of vertices
+     * @throws ArithmeticException if the number of unlabeled graphs with the
+     * specified number of vertices is too large to be represented by a
+     * {@code long}
+     */
+    public static long getNumGraphs(long order) {
+        long s = getMaximumSize(order);
+        if (s > 63)
+            throw new ArithmeticException();
+        return 1L << s;
+    }
+    
+    /**
+     * Returns the approximate number of unlabeled graphs with the specified
+     * number of vertices.. This is given by the exponential equation
+     * {@code 2^(v*(v-1)/2)}, where {@code v} is the number of vertices.
      *
      * @param order the order of the graph
      * @return the approximate number of possible edge configurations for a
      * graph with the specified number of vertices
      */
-    public static double getNumGraphs(long order) {
+    public static double getNumGraphsAprox(long order) {
         return Math.pow(2, getMaximumSize(order));
     }
     
