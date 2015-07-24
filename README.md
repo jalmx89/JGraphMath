@@ -1,2 +1,2 @@
 # JGraphMath
-Simple Java tools for math with Graphs
+Basic Java Tools for Math with Graphs
